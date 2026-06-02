@@ -1,0 +1,541 @@
+{
+  "name": "Daily news Automation",
+  "nodes": [
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        -288,
+        -384
+      ],
+      "id": "38ee246a-5f7e-416c-9d01-a57066413ac9",
+      "name": "When clicking ‘Execute workflow’"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT topic, keywords, category\nFROM news_topics\nWHERE is_active = TRUE\nORDER BY id ASC;\n\nDELETE FROM news_summaries;\n",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        -64,
+        -384
+      ],
+      "id": "4f770d4f-597d-4029-9931-ad191a105bbc",
+      "name": "Fetch Inserted topics",
+      "credentials": {
+        "postgres": {
+          "id": "Pz5LiQSqb8EQE2AD",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [
+        160,
+        -384
+      ],
+      "id": "abdff70d-e541-4e4d-bf30-c27d0605e067",
+      "name": "Loop Over Items"
+    },
+    {
+      "parameters": {
+        "jsCode": "const items = $input.all();\n\n// ── FIXED FETCH LOOP DATA ──\n// We use the linked item context to ensure the topic matches the current loop cycle\nlet topic = 'general';\nlet keywords = 'news';\n\ntry {\n  // $(nodeName).item refers to the specific input item mapped to this execution\n  const loopData = $('Loop Over Topics').item.json;\n  topic = loopData.topic || topic;\n  keywords = loopData.keywords || keywords;\n} catch (e) {\n  // Fallback: check if topic exists on the incoming $json directly\n  topic = $json.topic || topic;\n}\n\n// ── STORAGE ──\nconst articles = [];\nconst seenUrls = new Set();\nconst seenTitles = new Set();\n\n// ── PROCESS INPUT ──\nfor (const item of items) {\n  const d = item.json;\n\n  // ───────── NEWSAPI PARSER ─────────\n  if (d.articles && Array.isArray(d.articles)) {\n    for (const article of d.articles) {\n      let url = (article.url || '').trim();\n      let title = (article.title || '').toLowerCase().replace(/\\s+/g, ' ').trim();\n\n      if (!url || !title || url.includes('removed')) continue;\n\n      url = url.split('?')[0]; // Normalize URL\n\n      if (seenUrls.has(url) || seenTitles.has(title)) continue;\n\n      seenUrls.add(url);\n      seenTitles.add(title);\n\n      const articleId = `ART-${topic.replace(/\\s+/g, '-')}-${Math.abs(url.split('').reduce((a, c) => a + c.charCodeAt(0), 0))}`;\n\n      articles.push({\n        article_id: articleId,\n        topic: topic,\n        title: article.title || '',\n        description: (article.description || '').substring(0, 500),\n        content: (article.content || '').substring(0, 1000),\n        url: url,\n        source_name: article.source?.name || 'NewsAPI',\n        author: article.author || '',\n        published_at: article.publishedAt || new Date().toISOString(),\n        fetch_source: 'newsapi'\n      });\n    }\n  }\n\n  // ───────── FIRECRAWL / GOOGLE NEWS PARSER ─────────\n  if (d.data?.content || d.data?.markdown) {\n    const rawContent = d.data.markdown || d.data.content;\n    \n    // Split by Markdown links which usually indicate a new headline in Google News\n    const sections = rawContent.split(/\\[([^\\]]+)\\]\\((https:\\/\\/news\\.google\\.com\\/read\\/[^\\)]+)\\)/g);\n\n    for (let i = 1; i < sections.length; i += 2) {\n      const title = sections[i].trim();\n      const url = sections[i + 1].trim();\n      const normalizedTitle = title.toLowerCase();\n\n      if (!title || title.length < 10 || seenTitles.has(normalizedTitle)) continue;\n\n      seenTitles.add(normalizedTitle);\n\n      articles.push({\n        article_id: `FC-${topic.replace(/\\s+/g, '-')}-${i}-${Date.now()}`,\n        topic: topic,\n        title: title.substring(0, 200),\n        description: `Latest news about ${topic} from Google News.`,\n        content: title,\n        url: url,\n        source_name: 'Google News',\n        author: '',\n        published_at: new Date().toISOString(),\n        fetch_source: 'firecrawl'\n      });\n    }\n  }\n}\n\n// ── SORT BY DATE (LATEST FIRST) ──\narticles.sort((a, b) => new Date(b.published_at) - new Date(a.published_at));\n\n// ── LIMIT ──\nconst top10 = articles.slice(0, 10);\n\n// ── FAILSAFE ──\nif (top10.length === 0) {\n  return [{\n    json: {\n      topic: topic,\n      error: true,\n      message: 'No articles found for: ' + topic\n    }\n  }];\n}\n\n// ── RETURN ──\nreturn top10.map(a => ({ json: a }));"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        608,
+        -384
+      ],
+      "id": "71ebe9f3-0290-405e-9ac7-243f550dd939",
+      "name": "Parse and Deduplicate"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "dbcefe18-0d97-431c-9f6c-7e941ecc5407",
+              "leftValue": "={{ $json.content }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        832,
+        -384
+      ],
+      "id": "c2541013-cea8-467e-8a6a-b03b866cad39",
+      "name": "If"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO news_articles\n(\n  article_id,\n  topic,\n  title,\n  description,\n  article_content,\n  url,\n  source_name,\n  author,\n  published_at\n)\n\nVALUES\n(\n  '{{ ($json.article_id || \"\").replace(/'/g, \"''\") }}',\n\n  '{{ ($json.topic || \"\").replace(/'/g, \"''\") }}',\n\n  '{{ ($json.title || \"\").replace(/'/g, \"''\") }}',\n\n  '{{ ($json.description || \"\").replace(/'/g, \"''\") }}',\n\n  '{{ ($json.content || \"\").replace(/'/g, \"''\") }}',\n\n  '{{ ($json.url || \"\").replace(/'/g, \"''\") }}',\n\n  '{{ ($json.source_name || \"\").replace(/'/g, \"''\") }}',\n\n  '{{ ($json.author || \"\").replace(/'/g, \"''\") }}',\n\n  '{{ $json.published_at }}'\n)\n\nON CONFLICT (article_id) DO NOTHING;",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        1088,
+        -384
+      ],
+      "id": "becd96a6-5734-4969-8b67-f3e7c1bb83f1",
+      "name": "Execute a SQL query",
+      "credentials": {
+        "postgres": {
+          "id": "Pz5LiQSqb8EQE2AD",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT article_id, topic, title,\n       description, url, source_name,\n       published_at\nFROM news_articles\nWHERE topic = '{{ $('If').first().json.topic }}'\nAND DATE(fetched_at) = CURRENT_DATE\nORDER BY fetched_at DESC\nLIMIT 10;\n",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        1280,
+        -384
+      ],
+      "id": "24471b88-863e-4dbe-9cf2-943e70ce228c",
+      "name": "FOR AI",
+      "alwaysOutputData": true,
+      "credentials": {
+        "postgres": {
+          "id": "Pz5LiQSqb8EQE2AD",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=Analyze these news headlines and generate an intelligence briefing.\n\nNews Headlines:\n{{ $input.all().slice(0,5).map((i,idx)=>\n`${idx+1}. ${i.json.title}`\n).join('\\n') }}\n\nReturn this exact JSON format:\n\n{\n  \"headline\": \"Biggest story today\",\n  \"top_stories\": [\n    {\n      \"rank\": 1,\n      \"title\": \"\",\n      \"summary\": \"\",\n      \"importance\": \"High\",\n      \"source\": \"\"\n    }\n  ],\n  \"key_insight\": \"\",\n  \"sentiment\": \"\",\n  \"trend\": \"\"\n}",
+        "options": {
+          "systemMessage": "You are a world-class news intelligence analyst.\n\nYour job is to analyze news headlines and produce concise intelligence briefings.\n\nRules:\n- Focus only on the most important developments\n- Ignore noisy formatting, markdown, and broken links\n- Write short and clear summaries\n- Keep responses concise\n- Return ONLY valid JSON\n- No markdown\n- No explanations outside JSON"
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 3.1,
+      "position": [
+        1728,
+        -384
+      ],
+      "id": "5db234ae-6833-4f5c-89b6-43876cd4b6c5",
+      "name": "AI Agent"
+    },
+    {
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "value": "gpt-4o-mini",
+          "mode": "list",
+          "cachedResultName": "gpt-4o-mini"
+        },
+        "builtInTools": {},
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1.3,
+      "position": [
+        1712,
+        -176
+      ],
+      "id": "af30a7f3-8953-4755-9b25-3e585ccd464c",
+      "name": "OpenAI Chat Model",
+      "credentials": {
+        "openAiApi": {
+          "id": "X6yz5KIllfL8AWsR",
+          "name": "OpenAI account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const items = $input.all();\nconst results = [];\nconst seenHeadlines = new Set();\n\nfor (const item of items) {\n  let raw = item.json.output;\n\n  if (!raw) continue;\n\n  try {\n    // Parse string → JSON\n    const data = JSON.parse(raw);\n\n    const headline = (data.headline || '')\n      .toLowerCase()\n      .trim();\n\n    // Deduplicate\n    if (seenHeadlines.has(headline)) continue;\n    seenHeadlines.add(headline);\n\n    // Fix bad URLs\n    let story = data.top_stories?.[0] || {};\n\n    let url = story.url || '';\n    if (!url.startsWith('http')) {\n      url = null; // clean invalid links\n    }\n\n    results.push({\n      json: {\n        topic: data.topic || 'general',\n        headline: data.headline || '',\n        title: story.title || '',\n        summary: story.summary || '',\n        importance: story.importance || 'Medium',\n        source: story.source || '',\n        url: url,\n        key_insight: data.key_insight || '',\n        sentiment: data.sentiment || 'Neutral',\n        trend: data.trend || 'Stable',\n        created_at: new Date().toISOString()\n      }\n    });\n\n  } catch (e) {\n    // Skip bad JSON safely\n    continue;\n  }\n}\n\n// Limit results\nreturn results.slice(0, 5);"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2080,
+        -384
+      ],
+      "id": "43a51456-48c6-4d11-91b1-fbcde6ff442b",
+      "name": "Code in JavaScript"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "\nINSERT INTO news_summaries\n(\n  topic,\n  summary_date,\n  headline,\n  top_articles,\n  key_insight,\n  sentiment,\n  trend\n)\nVALUES (\n  '{{ $json.topic }}',\n  CURRENT_DATE,\n  '{{ ($json.headline || \"\").replace(/'/g, \"''\") }}',\n  '{{ JSON.stringify($json.top_stories || []).replace(/'/g, \"''\") }}',\n  '{{ ($json.key_insight || \"\").replace(/'/g, \"''\") }}',\n  '{{ ($json.sentiment || \"\").replace(/'/g, \"''\") }}',\n  '{{ ($json.trend || \"\").replace(/'/g, \"''\") }}'\n)\nON CONFLICT DO NOTHING;",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        2272,
+        -192
+      ],
+      "id": "6b294dfa-f143-4e2a-bc68-840d59e5529f",
+      "name": "Save in news sumary",
+      "credentials": {
+        "postgres": {
+          "id": "Pz5LiQSqb8EQE2AD",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT *\nFROM news_summaries\nWHERE summary_date = CURRENT_DATE\nORDER BY topic ASC;",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        384,
+        -576
+      ],
+      "id": "e9115975-ade2-4b37-b8c8-7507ea9af5b4",
+      "name": "Fetch Sumaries",
+      "credentials": {
+        "postgres": {
+          "id": "Pz5LiQSqb8EQE2AD",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const items = $input.all();\n\n// ── EMOJIS ──\nconst topicEmojis = {\n  'AI': '🤖', 'Finance': '💰',\n  'Geopolitics': '🌍', 'Crypto': '₿',\n  'Health': '🏥', 'Space': '🚀',\n  'Sports': '⚽', 'Tech': '💻'\n};\n\nconst sentimentEmojis = {\n  'Bullish': '📈', 'Bearish': '📉',\n  'Neutral': '➡️', 'Alarming': '🚨',\n  'Optimistic': '✅'\n};\n\n// ── STEP 1: DEDUPLICATION (topic + headline) ──\nconst seen = new Set();\nconst uniqueItems = [];\n\nfor (const item of items) {\n  const d = item.json;\n\n  const key =\n    (d.topic || '') + '|' +\n    (d.headline || '')\n      .toLowerCase()\n      .replace(/[^\\w\\s]/g, '')\n      .trim();\n\n  if (!seen.has(key)) {\n    seen.add(key);\n    uniqueItems.push(d);\n  }\n}\n\n// ── BUILD EMAIL HTML ──\nlet emailHtml = `\n<div style=\"font-family:Arial,sans-serif;\n            max-width:700px;margin:0 auto;\n            background:#f5f5f5;padding:20px;\">\n\n  <div style=\"background:linear-gradient(\n              135deg,#1a1a2e,#16213e);\n              color:white;padding:30px;\n              border-radius:12px;\n              text-align:center;\n              margin-bottom:20px;\">\n    <h1 style=\"margin:0;font-size:28px;\">\n      📰 News Intelligence Briefing\n    </h1>\n    <p style=\"margin:10px 0 0;opacity:0.8;\">\n      ${new Date().toLocaleDateString('en-US', {\n        weekday: 'long',\n        year: 'numeric',\n        month: 'long',\n        day: 'numeric'\n      })}\n    </p>\n  </div>\n`;\n\n// ── LOOP THROUGH CLEAN DATA ──\nfor (const d of uniqueItems) {\n\n  const emoji = topicEmojis[d.topic] || '📌';\n  const sentEmoji = sentimentEmojis[d.sentiment] || '➡️';\n\n  // ── SAFE PARSE STORIES ──\n  let stories = [];\n\n  if (typeof d.top_articles === 'string') {\n    try {\n      const parsed = JSON.parse(d.top_articles);\n\n      if (Array.isArray(parsed)) {\n        stories = parsed;\n      } else {\n        // fallback (your case)\n        stories = [{\n          title: d.headline,\n          summary: d.top_articles,\n          source: '',\n          importance: 'High'\n        }];\n      }\n    } catch {\n      // fallback (non-JSON string)\n      stories = [{\n        title: d.headline,\n        summary: d.top_articles,\n        source: '',\n        importance: 'High'\n      }];\n    }\n  } else if (Array.isArray(d.top_articles)) {\n    stories = d.top_articles;\n  }\n\n  // fallback if empty\n  if (stories.length === 0) {\n    stories = [{\n      title: d.headline,\n      summary: '',\n      source: '',\n      importance: 'Medium'\n    }];\n  }\n\n  const sentimentColors = {\n    'Bullish': '#28a745',\n    'Bearish': '#dc3545',\n    'Neutral': '#6c757d',\n    'Alarming': '#fd7e14',\n    'Optimistic': '#20c997'\n  };\n\n  const sentColor = sentimentColors[d.sentiment] || '#6c757d';\n\n  emailHtml += `\n  <div style=\"background:white;\n              border-radius:12px;\n              margin-bottom:20px;\n              overflow:hidden;\n              box-shadow:0 2px 8px \n                         rgba(0,0,0,0.1);\">\n\n    <div style=\"padding:20px;\n                border-left:5px solid ${sentColor};\n                background:#fafafa;\">\n      <div style=\"display:flex;\n                  justify-content:space-between;\n                  align-items:center;\">\n        <h2 style=\"margin:0;color:#1a1a2e;\n                   font-size:20px;\">\n          ${emoji} ${d.topic}\n        </h2>\n        <span style=\"background:${sentColor};\n                     color:white;\n                     padding:4px 12px;\n                     border-radius:20px;\n                     font-size:13px;\">\n          ${sentEmoji} ${d.sentiment}\n        </span>\n      </div>\n      <p style=\"margin:8px 0 0;\n                color:#555;\n                font-style:italic;\n                font-size:15px;\">\n        ${d.headline || ''}\n      </p>\n    </div>\n\n    <div style=\"padding:15px 20px;\">\n  `;\n\n  for (let i = 0; i < stories.length; i++) {\n    const story = stories[i];\n\n    const importanceColors = {\n      'High': '#dc3545',\n      'Medium': '#fd7e14',\n      'Low': '#28a745'\n    };\n\n    const impColor =\n      importanceColors[story.importance] || '#6c757d';\n\n    emailHtml += `\n      <div style=\"padding:12px 0;\n                  border-bottom:1px solid #f0f0f0;\">\n        <div style=\"display:flex;\n                    align-items:center;\n                    gap:8px;margin-bottom:4px;\">\n          <span style=\"background:${impColor};\n                       color:white;\n                       padding:2px 8px;\n                       border-radius:4px;\n                       font-size:11px;\n                       font-weight:bold;\">\n            ${story.importance || 'Medium'}\n          </span>\n          <span style=\"color:#999;font-size:12px;\">\n            ${story.source || ''}\n          </span>\n        </div>\n        <p style=\"margin:4px 0;\n                  font-weight:bold;\n                  color:#1a1a2e;\n                  font-size:15px;\">\n          ${story.title || ''}\n        </p>\n        <p style=\"margin:4px 0;\n                  color:#555;\n                  font-size:14px;\n                  line-height:1.5;\">\n          ${story.summary || ''}\n        </p>\n        ${story.url ? `\n        <a href=\"${story.url}\"\n           style=\"color:#007bff;\n                  font-size:13px;\n                  text-decoration:none;\">\n          Read full story →\n        </a>` : ''}\n      </div>\n    `;\n  }\n\n  emailHtml += `\n    </div>\n\n    <div style=\"background:#fff3cd;\n                padding:15px 20px;\n                border-top:1px solid #ffd93d;\">\n      <strong>💡 Key Insight:</strong>\n      ${d.key_insight || ''}\n    </div>\n  </div>\n  `;\n}\n\nemailHtml += `\n  <div style=\"text-align:center;\n              color:#999;font-size:12px;\n              padding:20px;\">\n    Generated by News Intelligence Dashboard\n    <br>Powered by n8n + OpenAI + NewsAPI\n  </div>\n</div>\n`;\n\n// ── TELEGRAM MESSAGE ──\nlet telegramMsg =\n  `📰 *Daily News Briefing*\\n` +\n  `_${new Date().toDateString()}_\\n\\n`;\n\nfor (const d of uniqueItems) {\n\n  const emoji = topicEmojis[d.topic] || '📌';\n  const sentEmoji = sentimentEmojis[d.sentiment] || '➡️';\n\n  let stories = [];\n\n  try {\n    const parsed = JSON.parse(d.top_articles);\n    stories = Array.isArray(parsed) ? parsed : [];\n  } catch {\n    stories = [{\n      title: d.headline,\n      summary: d.top_articles\n    }];\n  }\n\n  telegramMsg +=\n    `${emoji} *${d.topic}* ${sentEmoji} ${d.sentiment}\\n` +\n    `📌 ${d.headline || ''}\\n\\n`;\n\n  stories.slice(0, 3).forEach((s, i) => {\n    telegramMsg +=\n      `${i+1}. *${s.title || ''}*\\n` +\n      `${s.summary || ''}\\n`;\n\n    if (s.url) {\n      telegramMsg += `🔗 ${s.url}\\n`;\n    }\n\n    telegramMsg += '\\n';\n  });\n\n  telegramMsg +=\n    `💡 _${d.key_insight || ''}_\\n` +\n    `${'─'.repeat(30)}\\n\\n`;\n}\n\n// ── FINAL OUTPUT ──\nreturn [{\n  json: {\n    email_html: emailHtml,\n    telegram_msg: telegramMsg,\n    topics_covered: uniqueItems\n      .map(i => i.topic).join(', '),\n    total_topics: uniqueItems.length,\n    generated_at: new Date().toISOString()\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        608,
+        -576
+      ],
+      "id": "5aa0c3b8-3cb2-4e77-82b0-cb50e1f2463f",
+      "name": "Format Digest"
+    },
+    {
+      "parameters": {
+        "sendTo": "dewanshu9004@gmail.com",
+        "subject": "=📰 News Intelligence — {{ $now.format('MMM DD YYYY') }}",
+        "message": "={{ $json.email_html }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.2,
+      "position": [
+        832,
+        -576
+      ],
+      "id": "deee5bf9-cd4c-40ef-93d3-49d0f096eea8",
+      "name": "Send a message",
+      "webhookId": "ed866b1c-04b7-4643-81ce-2b01507b4eb7",
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "FSbocXLNhDlxLjVr",
+          "name": "Gmail account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO digest_log\n(run_date, topics_covered,\n articles_fetched, emails_sent,\n telegram_sent, status)\nVALUES (\n  CURRENT_DATE,\n  '{{ $('Format Digest').first().json.topics_covered }}',\n  {{ Number($json.total_topics || 0) * 10 }},\n  1,\n  TRUE,\n  'completed'\n);",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        1056,
+        -576
+      ],
+      "id": "d9e58234-c35c-4188-ae1e-685f79516a54",
+      "name": "log digest",
+      "credentials": {
+        "postgres": {
+          "id": "Pz5LiQSqb8EQE2AD",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "=POST",
+        "url": "https://api.firecrawl.dev/v0/scrape",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Your_key"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"url\": \"https://news.google.com/search?q={{ $json.keywords }}&hl=en&gl=US\",\n  \"pageOptions\": {\n    \"onlyMainContent\": true,\n    \"includeHtml\": false\n  }\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        384,
+        -384
+      ],
+      "id": "f2f073fd-7ce1-4a07-9fe4-a912af7d9284",
+      "name": "Firecrawl Tech News",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "rC14Po3LHo3Qc8xR",
+          "name": "Header Auth account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "\n\nconst items = $input.all();\n\nfunction cleanText(text = '') {\n  return text\n    // remove markdown images\n    .replace(/!\\[.*?\\]\\(.*?\\)/g, '')\n    \n    // remove urls\n    .replace(/https?:\\/\\/\\S+/g, '')\n    \n    // remove extra markdown\n    .replace(/\\*+/g, '')\n    \n    // remove excessive whitespace\n    .replace(/\\s+/g, ' ')\n    \n    .trim();\n}\n\nconst cleaned = items\n  .map(item => {\n    const d = item.json;\n\n    let title = cleanText(d.title || '');\n    let url = d.url || '';\n\n    // Sometimes title/url swapped\n    if (title.startsWith('http')) {\n      title = cleanText(url);\n      url = d.title || '';\n    }\n\n    return {\n      json: {\n        topic: d.topic,\n        source_name: d.source_name,\n        title,\n        description: cleanText(d.description || ''),\n        url,\n        published_at: d.published_at\n      }\n    };\n  })\n\n  // remove garbage titles\n  .filter(i =>\n    i.json.title &&\n    i.json.title.length > 20 &&\n    !i.json.title.includes('There are no items to show')\n  )\n\n  // keep only best 5\n  .slice(0, 5);\n\nreturn cleaned;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1504,
+        -384
+      ],
+      "id": "e3ea14da-3a87-4745-8280-d28ffb142cdf",
+      "name": "Code in JavaScript1"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "When clicking ‘Execute workflow’": {
+      "main": [
+        [
+          {
+            "node": "Fetch Inserted topics",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Inserted topics": {
+      "main": [
+        [
+          {
+            "node": "Loop Over Items",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Loop Over Items": {
+      "main": [
+        [
+          {
+            "node": "Fetch Sumaries",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Firecrawl Tech News",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse and Deduplicate": {
+      "main": [
+        [
+          {
+            "node": "If",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If": {
+      "main": [
+        [
+          {
+            "node": "Execute a SQL query",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Execute a SQL query": {
+      "main": [
+        [
+          {
+            "node": "FOR AI",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "FOR AI": {
+      "main": [
+        [
+          {
+            "node": "Code in JavaScript1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenAI Chat Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI Agent": {
+      "main": [
+        [
+          {
+            "node": "Code in JavaScript",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code in JavaScript": {
+      "main": [
+        [
+          {
+            "node": "Save in news sumary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Save in news sumary": {
+      "main": [
+        [
+          {
+            "node": "Loop Over Items",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Sumaries": {
+      "main": [
+        [
+          {
+            "node": "Format Digest",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Digest": {
+      "main": [
+        [
+          {
+            "node": "Send a message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send a message": {
+      "main": [
+        [
+          {
+            "node": "log digest",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Firecrawl Tech News": {
+      "main": [
+        [
+          {
+            "node": "Parse and Deduplicate",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code in JavaScript1": {
+      "main": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "versionId": "7878074e-1ef2-4002-82ab-872dd0e9262a",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "dfa9bd419da97e8a72d6069acb67e95575c89baa71302d0781a7331301986176"
+  },
+  "id": "5hCgxg8cYhdWSurl",
+  "tags": []
+}
